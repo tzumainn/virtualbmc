@@ -31,6 +31,10 @@ class DomainNotFound(VirtualBMCError):
     message = 'No domain with matching name %(domain)s was found'
 
 
+class NodeNotFound(VirtualBMCError):
+    message = 'No node with matching name %(node)s was found'
+
+
 class LibvirtConnectionOpenError(VirtualBMCError):
     message = ('Fail to establish a connection with libvirt URI "%(uri)s". '
                'Error: %(error)s')

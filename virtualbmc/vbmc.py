@@ -12,7 +12,7 @@
 
 import xml.etree.ElementTree as ET
 
-import libvirt
+import openstack
 import pyghmi.ipmi.bmc as bmc
 
 from virtualbmc import exception
@@ -36,14 +36,14 @@ IPMI_INVALID_DATA = 0xcc
 
 # Boot device maps
 GET_BOOT_DEVICES_MAP = {
-    'network': 4,
-    'hd': 8,
+    'pxe': 4,
+    'disk': 8,
     'cdrom': 0x14,
 }
 
 SET_BOOT_DEVICES_MAP = {
-    'network': 'network',
-    'hd': 'hd',
+    'network': 'pxe',
+    'hd': 'disk',
     'optical': 'cdrom',
 }
 
@@ -56,35 +56,14 @@ class VirtualBMC(bmc.Bmc):
         super(VirtualBMC, self).__init__({username: password},
                                          port=port, address=address)
         self.domain_name = domain_name
-        self._conn_args = {'uri': libvirt_uri,
-                           'sasl_username': libvirt_sasl_username,
-                           'sasl_password': libvirt_sasl_password}
-
-    # Copied from nova/virt/libvirt/guest.py
-    def get_xml_desc(self, domain, dump_sensitive=False):
-        """Returns xml description of guest.
-
-        :param domain: The libvirt domain to call
-        :param dump_sensitive: Dump security sensitive information
-        :returns string: XML description of the guest
-        """
-        flags = dump_sensitive and libvirt.VIR_DOMAIN_XML_SECURE or 0
-        return domain.XMLDesc(flags=flags)
 
     def get_boot_device(self):
         LOG.debug('Get boot device called for %(domain)s',
                   {'domain': self.domain_name})
-        with utils.libvirt_open(readonly=True, **self._conn_args) as conn:
-            domain = utils.get_libvirt_domain(conn, self.domain_name)
-            boot_element = ET.fromstring(domain.XMLDesc()).find('.//os/boot')
-            boot_dev = None
-            if boot_element is not None:
-                boot_dev = boot_element.attrib.get('dev')
-            return GET_BOOT_DEVICES_MAP.get(boot_dev, 0)
-
-    def _remove_boot_elements(self, parent_element):
-        for boot_element in parent_element.findall('boot'):
-            parent_element.remove(boot_element)
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        boot_device = conn.baremetal.get_node_boot_device(self.domain_name).get(
+            'boot_device', None)
+        return GET_BOOT_DEVICES_MAP.get(boot_device, 0)
 
     def set_boot_device(self, bootdevice):
         LOG.debug('Set boot device called for %(domain)s with boot '
@@ -95,121 +74,48 @@ class VirtualBMC(bmc.Bmc):
             # Invalid data field in request
             return IPMI_INVALID_DATA
 
-        try:
-            with utils.libvirt_open(**self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                tree = ET.fromstring(
-                    self.get_xml_desc(domain, dump_sensitive=True))
-
-                # Remove all "boot" element under "devices"
-                # They are mutually exclusive with "os/boot"
-                for device_element in tree.findall('devices/*'):
-                    self._remove_boot_elements(device_element)
-
-                for os_element in tree.findall('os'):
-                    # Remove all "boot" elements under "os"
-                    self._remove_boot_elements(os_element)
-
-                    # Add a new boot element with the request boot device
-                    boot_element = ET.SubElement(os_element, 'boot')
-                    boot_element.set('dev', device)
-
-                conn.defineXML(ET.tostring(tree, encoding="unicode"))
-        except libvirt.libvirtError:
-            LOG.error('Failed setting the boot device  %(bootdev)s for '
-                      'domain %(domain)s', {'bootdev': device,
-                                            'domain': self.domain_name})
-            # Command failed, but let client to retry
-            return IPMI_COMMAND_NODE_BUSY
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        conn.baremetal.set_node_boot_device(self.domain_name, device)
+        return
 
     def get_power_state(self):
         LOG.debug('Get power state called for domain %(domain)s',
                   {'domain': self.domain_name})
-        try:
-            with utils.libvirt_open(readonly=True, **self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                if domain.isActive():
-                    return POWERON
-        except libvirt.libvirtError as e:
-            msg = ('Error getting the power state of domain %(domain)s. '
-                   'Error: %(error)s' % {'domain': self.domain_name,
-                                         'error': e})
-            LOG.error(msg)
-            raise exception.VirtualBMCError(message=msg)
-
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        node = conn.baremetal.find_node(self.domain_name)
+        if node.power_state == 'power on':
+            return POWERON
         return POWEROFF
 
     def pulse_diag(self):
-        LOG.debug('Power diag called for domain %(domain)s',
+        LOG.debug('Get power state called for domain %(domain)s',
                   {'domain': self.domain_name})
-        try:
-            with utils.libvirt_open(**self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                if domain.isActive():
-                    domain.injectNMI()
-        except libvirt.libvirtError as e:
-            LOG.error('Error powering diag the domain %(domain)s. '
-                      'Error: %(error)s', {'domain': self.domain_name,
-                                           'error': e})
-            # Command failed, but let client to retry
-            return IPMI_COMMAND_NODE_BUSY
+        return IPMI_COMMAND_NODE_BUSY
 
     def power_off(self):
         LOG.debug('Power off called for domain %(domain)s',
                   {'domain': self.domain_name})
-        try:
-            with utils.libvirt_open(**self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                if domain.isActive():
-                    domain.destroy()
-        except libvirt.libvirtError as e:
-            LOG.error('Error powering off the domain %(domain)s. '
-                      'Error: %(error)s', {'domain': self.domain_name,
-                                           'error': e})
-            # Command failed, but let client to retry
-            return IPMI_COMMAND_NODE_BUSY
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        conn.baremetal.set_node_power_state(self.domain_name, 'power off')
+        return
 
     def power_on(self):
         LOG.debug('Power on called for domain %(domain)s',
                   {'domain': self.domain_name})
-        try:
-            with utils.libvirt_open(**self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                if not domain.isActive():
-                    domain.create()
-        except libvirt.libvirtError as e:
-            LOG.error('Error powering on the domain %(domain)s. '
-                      'Error: %(error)s', {'domain': self.domain_name,
-                                           'error': e})
-            # Command failed, but let client to retry
-            return IPMI_COMMAND_NODE_BUSY
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        conn.baremetal.set_node_power_state(self.domain_name, 'power on')
+        return
 
     def power_shutdown(self):
         LOG.debug('Soft power off called for domain %(domain)s',
                   {'domain': self.domain_name})
-        try:
-            with utils.libvirt_open(**self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                if domain.isActive():
-                    domain.shutdown()
-        except libvirt.libvirtError as e:
-            LOG.error('Error soft powering off the domain %(domain)s. '
-                      'Error: %(error)s', {'domain': self.domain_name,
-                                           'error': e})
-            # Command failed, but let client to retry
-            return IPMI_COMMAND_NODE_BUSY
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        conn.baremetal.set_node_power_state(self.domain_name, 'power off')
+        return
 
     def power_reset(self):
         LOG.debug('Power reset called for domain %(domain)s',
                   {'domain': self.domain_name})
-        try:
-            with utils.libvirt_open(**self._conn_args) as conn:
-                domain = utils.get_libvirt_domain(conn, self.domain_name)
-                if domain.isActive():
-                    domain.reset()
-        except libvirt.libvirtError as e:
-            LOG.error('Error reseting the domain %(domain)s. '
-                      'Error: %(error)s', {'domain': self.domain_name,
-                                           'error': e})
-            # Command not supported in present state
-            return IPMI_COMMAND_NODE_BUSY
+        conn = openstack.connect(cloud='overcloud', region_name='regionOne')
+        conn.baremetal.set_node_power_state(self.domain_name, 'rebooting')
+        return

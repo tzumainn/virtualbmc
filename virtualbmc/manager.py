@@ -49,8 +49,7 @@ class VirtualBMCManager(object):
     def _parse_config(self, domain_name):
         config_path = os.path.join(self.config_dir, domain_name, 'config')
         if not os.path.exists(config_path):
-            raise exception.DomainNotFound(domain=domain_name)
-
+            raise exception.NodeNotFound(node=domain_name)
         try:
             config = configparser.ConfigParser()
             config.read(config_path)
@@ -80,6 +79,11 @@ class VirtualBMCManager(object):
             if value is not None:
                 config.set(DEFAULT_SECTION, option, str(value))
 
+        node_config_dir = os.path.join(
+            self.config_dir, options['domain_name']
+        )
+        if not os.path.exists(node_config_dir):
+            os.mkdir(node_config_dir)
         config_path = os.path.join(
             self.config_dir, options['domain_name'], 'config'
         )
@@ -231,42 +235,17 @@ class VirtualBMCManager(object):
         self._sync_vbmc_states(shutdown)
 
     def add(self, username, password, port, address, domain_name,
-            libvirt_uri, libvirt_sasl_username, libvirt_sasl_password,
             **kwargs):
 
-        # check libvirt's connection and if domain exist prior to adding it
-        utils.check_libvirt_connection_and_domain(
-            libvirt_uri, domain_name,
-            sasl_username=libvirt_sasl_username,
-            sasl_password=libvirt_sasl_password)
+        if not utils.get_node(domain_name):
+            raise exception.NodeNotFound(node=domain_name)
 
-        domain_path = os.path.join(self.config_dir, domain_name)
-
-        try:
-            os.makedirs(domain_path)
-        except OSError as ex:
-            if ex.errno == errno.EEXIST:
-                return 1, str(ex)
-
-            msg = ('Failed to create domain %(domain)s. '
-                   'Error: %(error)s' % {'domain': domain_name, 'error': ex})
-            LOG.error(msg)
-            return 1, msg
-
-        try:
-            self._store_config(domain_name=domain_name,
-                               username=username,
-                               password=password,
-                               port=str(port),
-                               address=address,
-                               libvirt_uri=libvirt_uri,
-                               libvirt_sasl_username=libvirt_sasl_username,
-                               libvirt_sasl_password=libvirt_sasl_password,
-                               active=False)
-
-        except Exception as ex:
-            self.delete(domain_name)
-            return 1, str(ex)
+        self._store_config(domain_name=domain_name,
+                           username=username,
+                           password=password,
+                           address=address,
+                           port=str(port),
+                           active=False)
 
         return 0, ''
 
@@ -341,5 +320,5 @@ class VirtualBMCManager(object):
 
         return rc, tables
 
-    def show(self, domain_name):
-        return 0, list(self._show(domain_name).items())
+    def show(self, node):
+        return 0, list(self._show(node).items())
